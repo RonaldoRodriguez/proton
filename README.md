@@ -1,7 +1,12 @@
 ## ProtonCompiler
-
+# Demo rápido:
 ```shell
-  deno run --sloppy-imports main.ts demo.cyn
+  deno run --sloppy-imports --allow-write --allow-read=. main.ts demo.cyn -o demo.wasm
+```
+# Deno + Wasmtime:
+```shell
+  deno run --sloppy-imports --allow-write --allow-read=. main.ts generic.cyn -o generic.wasm
+  wasmtime run generic.wasm
 ```
 # Mi recomendación:
 ```shell
