@@ -1,0 +1,16 @@
+namespace my {
+    class StrExtra {
+        public static string reverse(string s) {
+            int n = s.length;
+            ptr b = Unsafe.memory.alloc(4 + n);
+            Unsafe.pointer.write32(b, n);
+            for (int i = 0; i < n; i = i + 1) {
+                Unsafe.pointer.write8(
+                    Unsafe.pointer.offset(b, 4 + i),
+                    Unsafe.pointer.read8(Unsafe.pointer.offset(s, n - 1 - i))
+                );
+            }
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+    }
+}
