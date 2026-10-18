@@ -1,0 +1,6 @@
+class Program {
+    static int main() {
+        System.println(File.readAll("out.txt"));
+        return 0;
+    }
+}

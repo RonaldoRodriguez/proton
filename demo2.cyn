@@ -1,0 +1,27 @@
+class Program {
+    static int main() {
+        System.println("=== Cast test ===");
+
+        int i = 42;
+        double d = i as double;
+        int i2 = 3.9 as int;
+        int64 big = i as int64;
+        int i3 = big as int;
+        uint8 byte = 200 as uint8;
+        int i4 = byte as int;
+
+        System.println("int as double:", d);       // 42.00
+        System.println("double as int:", i2);      // 3 (trunc)
+        System.println("int as int64:", big);      // 42
+        System.println("int64 as int:", i3);       // 42
+        System.println("uint8 as int:", i4);       // 200
+
+        double pi = 3.14159;
+        int floorPi = pi as int;
+        int ceilPi = (pi + 0.9999) as int;
+        System.println("floor(pi):", floorPi);     // 3
+        System.println("ceil(pi):", ceilPi);       // 4
+
+        return 0;
+    }
+}

@@ -1,0 +1,21 @@
+class Println {
+    public:
+        int value;
+        ~Println(){
+            System.println("Destruido");
+        }
+}
+
+class Program {
+    static void main(){
+        Println p = new Println();
+        p.value = 20;
+        delete p;
+
+        ptr z = Unsafe.memory.alloc(8);
+        Unsafe.pointer.write32(z, 4);
+        System.println(Unsafe.pointer.read32(z));
+        Unsafe.memory.free(z);
+
+    }
+}

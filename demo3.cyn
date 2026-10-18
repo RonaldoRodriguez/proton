@@ -1,0 +1,22 @@
+class Program {
+    static int main() {
+        System.println("sqrt(2)     =", Math.sqrt(2));         // coerce int → double
+        System.println("sqrt(2.0)   =", Math.sqrt(2.0));       // ya es double
+        System.println("sqrt(16)    =", Math.sqrt(16));
+        System.println("abs(-7.5)   =", Math.abs(-7.5));
+        System.println("abs(-7)     =", Math.abs(-7));         // coerce int → double
+        System.println("floor(3.7)  =", Math.floor(3.7));
+        System.println("ceil(3.1)   =", Math.ceil(3.1));
+        System.println("round(3.5)  =", Math.round(3.5));
+        System.println("trunc(-3.7) =", Math.trunc(-3.7));
+        System.println("min(3,7)    =", Math.min(3, 7));
+        System.println("max(3,7)    =", Math.max(3, 7));
+        System.println("copysign(5,-1)=", Math.copysign(5, -1));
+
+        double x = 25;
+        System.println("sqrt(x=25)  =", Math.sqrt(x));        // x ya es double
+        int64 big = 1000000;
+        System.println("sqrt(1e6)   =", Math.sqrt(big));       // int64 → double ✓ (fix 2)
+        return 0;
+    }
+}

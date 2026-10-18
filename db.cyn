@@ -1,0 +1,23 @@
+abstract class iP {
+
+}
+class Animal: iP {
+    public int age;
+    public Animal(int a) { this.age = a; }
+}
+
+class Dog : Animal {
+    public string name;
+    public Dog(string n, int a) {
+        super(a);
+        this.name = n;
+    }
+}
+
+class Program {
+    static int main() {
+        Dog d = new Dog("Rex", 3);
+        System.println("name:", d.name, "age:", d.age);
+        return 0;
+    }
+}

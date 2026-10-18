@@ -1,0 +1,15 @@
+class Program {
+    static int main() {
+        float[] arr = new float[4];
+        arr[0] = 1.1f;
+        arr[1] = 2.2f;
+        arr[2] = 3.3f;
+        arr[3] = 4.4f;
+        for (int i = 0; i < 4; i = i + 1) {
+            System.write(arr[i]); System.write(" ");
+        }
+        System.println("");
+        System.println("len:", arr.length);
+        return 0;
+    }
+}

@@ -1,0 +1,39 @@
+class Program {
+    static int main() {
+        // 1. exists
+        System.println("existe test.txt:", File.exists("test.txt"));
+        System.println("existe nope.txt:", File.exists("nope.txt"));
+
+        // 2. readAll
+        string content = File.readAll("test.txt");
+        System.println("len:", content.length);
+        System.write("contenido: [");
+        System.write(content);
+        System.println("]");
+
+        // 3. writeAll (crea)
+        bool ok = File.writeAll("out.txt", "Hola desde Cyn!\n");
+        System.println("writeAll:", ok);
+
+        // 4. append
+        bool ok2 = File.append("out.txt", "Línea añadida.\n");
+        bool ok3 = File.append("out.txt", "Y otra más.\n");
+        System.println("append:", ok2, ok3);
+
+        // 5. readAll del nuevo archivo
+        string outContent = File.readAll("out.txt");
+        System.println("out.txt:", outContent);
+
+        // 6. readAll de archivo inexistente (retorna "")
+        string missing = File.readAll("no-existe.txt");
+        System.println("missing.length:", missing.length);
+
+        // 7. read + parse (caso real: leer input.txt con un número)
+        bool w = File.writeAll("num.txt", "42");
+        string numStr = File.readAll("num.txt");
+        int n = StringUtil.parseInt(numStr);
+        System.println("parseado:", n, "sqrt:", Math.sqrt(n));
+
+        return 0;
+    }
+}

@@ -1,0 +1,59 @@
+// main.cyn
+include "./lib/json";
+
+class Program {
+    static int main() {
+        // Intenta leer data.json, si no existe usa inline
+        string jsonText = File.readAll("data.json");
+        if (jsonText.length == 0) {
+            jsonText = "{\"name\":\"Ronaldo\",\"age\":28,\"hobbies\":[\"coding\",\"gaming\"],\"address\":{\"city\":\"Caracas\",\"country\":\"Venezuela\"},\"married\":false,\"score\":4.5}";
+        }
+
+        ptr v = json.Parser.parse(jsonText);
+
+        System.println("=== Original ===");
+        System.println(jsonText);
+
+        System.println("");
+        System.println("=== Pretty ===");
+        System.println(json.Write.pretty(v));
+
+        System.println("");
+        System.println("=== Compact ===");
+        System.println(json.Write.serialize(v));
+
+        System.println("");
+        System.println("=== Queries ===");
+        ptr nameV = json.Value.getKey(v, "name");
+        ptr ageV  = json.Value.getKey(v, "age");
+        ptr mArr  = json.Value.getKey(v, "married");
+        ptr hArr  = json.Value.getKey(v, "hobbies");
+        ptr addr  = json.Value.getKey(v, "address");
+        ptr score = json.Value.getKey(v, "score");
+
+        System.println("name    =", json.Value.asString(nameV));
+        System.println("age     =", json.Value.asNumber(ageV));
+        System.println("score   =", json.Value.asNumber(score));
+        System.println("married =", json.Value.asBool(mArr));
+        System.println("city    =", json.Value.asString(json.Value.getKey(addr, "city")));
+
+        int nh = json.Value.countOf(hArr);
+        System.println("hobbies =", nh);
+        for (int i = 0; i < nh; i = i + 1) {
+            System.println("  [", i, "]", json.Value.asString(json.Value.at(hArr, i)));
+        }
+
+        System.println("");
+        System.println("=== Round-trip ===");
+        string compact1 = json.Write.serialize(v);
+        ptr v2 = json.Parser.parse(compact1);
+        string compact2 = json.Write.serialize(v2);
+        if (compact1 == compact2) {
+            System.println("OK: round-trip estable");
+        } else {
+            System.println("FAIL: round-trip diffiere");
+        }
+
+        return 0;
+    }
+}

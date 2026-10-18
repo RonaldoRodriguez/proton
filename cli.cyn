@@ -1,0 +1,41 @@
+class Program {
+    static int main() {
+        System.write("Nombre: ");
+        string name = System.readLine();
+
+        System.write("Edad: ");
+        int age = System.readInt();
+
+        System.write("Altura (m): ");
+        double height = StringUtil.parseDouble(System.readLine());
+
+        System.println("");
+        System.println("Hola", name);
+        System.println("  edad:", age);
+        System.println("  altura:", height);
+
+        if (age >= 18) {
+            System.println("Eres mayor de edad");
+        } else {
+            System.println("Eres menor de edad");
+        }
+
+        System.println("Mayúsculas:", StringUtil.toUpper(name));
+        System.println("Trim:", "[" + StringUtil.trim("  hola  ") + "]");
+        System.println("Index 'o':", StringUtil.indexOf(name, "o"));
+
+        int[] nums = new int[5];
+        nums[0] = 5; nums[1] = 2; nums[2] = 8; nums[3] = 1; nums[4] = 9;
+        ArrayInt.sort(nums, (int a, int b) => a < b);
+        System.write("sort:");
+        for (int i = 0; i < nums.length; i = i + 1) {
+            System.write(" " + StringUtil.fromInt(nums[i]));
+        }
+        System.println("");
+
+        System.println("sqrt(age) =", Math.sqrt(age));
+        System.println("sign(-7) =", MathExt.sign(-7.0));
+        System.println("clamp(15,0,10) =", MathExt.clamp(15.0, 0.0, 10.0));
+        return 0;
+    }
+}

@@ -1,0 +1,436 @@
+// stdlib.cyn
+// Cyn Standard Library — 100% Cyn puro sobre builtins existentes.
+
+namespace std {
+
+    class UTF8 {
+    // Decodifica 1 codepoint empezando en el byte `i` del string `s`.
+    // Escribe la siguiente posición de byte en `nextIdx[0]`.
+    // Retorna el codepoint, o -1 si la secuencia es inválida.
+    public static int decodeAt(string s, int i, int[] nextIdx) {
+        int n = s.length;
+        if (i < 0 || i >= n) { nextIdx[0] = i; return -1; }
+        int b0 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+
+        // 1 byte: 0xxxxxxx
+        if (b0 < 0x80) { nextIdx[0] = i + 1; return b0; }
+
+        // 2 bytes: 110xxxxx 10xxxxxx
+        if ((b0 & 0xE0) == 0xC0) {
+            if (i + 1 >= n) { nextIdx[0] = i + 1; return -1; }
+            int b1 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 1));
+            if ((b1 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            nextIdx[0] = i + 2;
+            return ((b0 & 0x1F) << 6) | (b1 & 0x3F);
+        }
+
+        // 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
+        if ((b0 & 0xF0) == 0xE0) {
+            if (i + 2 >= n) { nextIdx[0] = i + 1; return -1; }
+            int b1 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 1));
+            int b2 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 2));
+            if ((b1 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            if ((b2 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            nextIdx[0] = i + 3;
+            return ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+        }
+
+        // 4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        if ((b0 & 0xF8) == 0xF0) {
+            if (i + 3 >= n) { nextIdx[0] = i + 1; return -1; }
+            int b1 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 1));
+            int b2 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 2));
+            int b3 = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + 3));
+            if ((b1 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            if ((b2 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            if ((b3 & 0xC0) != 0x80) { nextIdx[0] = i + 1; return -1; }
+            nextIdx[0] = i + 4;
+            return ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+        }
+
+        nextIdx[0] = i + 1;
+        return -1;   // byte de continuación suelto o byte de inicio inválido
+    }
+
+    // Cuenta codepoints (no bytes).
+    public static int count(string s) {
+        int n = s.length;
+        int i = 0;
+        int cnt = 0;
+        int[] next = new int[1];
+        while (i < n) {
+            UTF8.decodeAt(s, i, next);
+            i = next[0];
+            cnt = cnt + 1;
+        }
+        return cnt;
+    }
+
+    // Codifica `cp` en `buf[offset..]`. Retorna bytes escritos (0 si inválido).
+    public static int encodeAt(ptr buf, int offset, int cp) {
+        if (cp < 0) return 0;
+        if (cp > 0x10FFFF) return 0;
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;  // surrogates no van en UTF-8
+
+        if (cp < 0x80) {
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset), cp);
+            return 1;
+        }
+        if (cp < 0x800) {
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset),     0xC0 | (cp >> 6));
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 1), 0x80 | (cp & 0x3F));
+            return 2;
+        }
+        if (cp < 0x10000) {
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset),     0xE0 | (cp >> 12));
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 1), 0x80 | ((cp >> 6) & 0x3F));
+            Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 2), 0x80 | (cp & 0x3F));
+            return 3;
+        }
+        Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset),     0xF0 | (cp >> 18));
+        Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 1), 0x80 | ((cp >> 12) & 0x3F));
+        Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 2), 0x80 | ((cp >> 6) & 0x3F));
+        Unsafe.pointer.write8(Unsafe.pointer.offset(buf, offset + 3), 0x80 | (cp & 0x3F));
+        return 4;
+    }
+
+    // Obtiene el codepoint número `charIdx` (0-based, sobre codepoints).
+    // Retorna -1 si está fuera de rango.
+    public static int codepointAt(string s, int charIdx) {
+        int n = s.length;
+        int i = 0;
+        int idx = 0;
+        int[] next = new int[1];
+        while (i < n) {
+            int cp = UTF8.decodeAt(s, i, next);
+            if (idx == charIdx) return cp;
+            i = next[0];
+            idx = idx + 1;
+        }
+        return -1;
+    }
+
+    // substring por índice de codepoints (charIdx, count).
+    public static string substring(string s, int charStart, int charCount) {
+        int n = s.length;
+        int byteStart = -1;
+        int byteEnd = n;
+        int i = 0;
+        int idx = 0;
+        int[] next = new int[1];
+        while (i < n) {
+            if (idx == charStart && byteStart < 0) byteStart = i;
+            if (idx == charStart + charCount) { byteEnd = i; break; }
+            UTF8.decodeAt(s, i, next);
+            i = next[0];
+            idx = idx + 1;
+        }
+        if (byteStart < 0) byteStart = n;
+        if (byteEnd < byteStart) byteEnd = byteStart;
+        return StringUtil.byteSubstring(s, byteStart, byteEnd - byteStart);
+    }
+
+    // Convierte a string desde un array de codepoints.
+    public static string fromCodepoints(int[] cps) {
+        int n = cps.length;
+        ptr buf = Unsafe.memory.alloc(4 + n * 4);
+        int offset = 0;
+        for (int i = 0; i < n; i = i + 1) {
+            offset = offset + UTF8.encodeAt(buf, 4 + offset, cps[i]);
+        }
+        Unsafe.pointer.write32(buf, offset);
+        return Unsafe.pointer.offset(buf, 4) as string;
+    }
+
+    // Convierte a array de codepoints.
+    public static int[] toCodepoints(string s) {
+        int n = s.length;
+        int count = UTF8.count(s);
+        int[] result = new int[count];
+        int i = 0;
+        int idx = 0;
+        int[] next = new int[1];
+        while (i < n) {
+            int cp = UTF8.decodeAt(s, i, next);
+            result[idx] = cp;
+            i = next[0];
+            idx = idx + 1;
+        }
+        return result;
+    }
+}
+
+    class MathExt {
+        public static double sign(double x) {
+            if (x > 0.0) return 1.0;
+            if (x < 0.0) return -1.0;
+            return 0.0;
+        }
+        public static double clamp(double x, double lo, double hi) {
+            return Math.max(lo, Math.min(hi, x));
+        }
+        public static double pow(double base, int exp) {
+            if (exp < 0) return 0.0;
+            double result = 1.0;
+            for (int i = 0; i < exp; i = i + 1) result = result * base;
+            return result;
+        }
+        public static int absInt(int x) { return x < 0 ? -x : x; }
+        public static int minInt(int a, int b) { return a < b ? a : b; }
+        public static int maxInt(int a, int b) { return a > b ? a : b; }
+        public static int clampInt(int x, int lo, int hi) {
+            return MathExt.maxInt(lo, MathExt.minInt(hi, x));
+        }
+        public static double powIntAsDouble(int base, int exp) {
+            double r = 1.0;
+            double b = base as double;
+            for (int i = 0; i < exp; i = i + 1) r = r * b;
+            return r;
+        }
+    }
+
+    class StringUtil {
+
+        public static int byteLength(string s) { return s.length; }
+
+        public static int byteAt(string s, int i) {
+            if (i < 0) return -1;
+            if (i >= s.length) return -1;
+            return Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+        }
+        public static string substring(string s, int start, int len) {
+            return StringUtil.byteSubstring(s, start, len);
+        }
+
+        public static string byteSubstring(string s, int start, int len) {
+            if (start < 0) start = 0;
+            if (start > s.length) start = s.length;
+            if (start + len > s.length) len = s.length - start;
+            if (len < 0) len = 0;
+            ptr b = Unsafe.memory.alloc(4 + len);
+            Unsafe.pointer.write32(b, len);
+            for (int i = 0; i < len; i = i + 1) {
+                Unsafe.pointer.write8(
+                    Unsafe.pointer.offset(b, 4 + i),
+                    Unsafe.pointer.read8(Unsafe.pointer.offset(s, start + i))
+                );
+            }
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+
+        public static int indexOf(string s, string needle) {
+            int n = s.length;
+            int m = needle.length;
+            if (m == 0) return 0;
+            if (m > n) return -1;
+            for (int i = 0; i <= n - m; i = i + 1) {
+                bool match = true;
+                for (int j = 0; j < m; j = j + 1) {
+                    if (Unsafe.pointer.read8(Unsafe.pointer.offset(s, i + j)) !=
+                        Unsafe.pointer.read8(Unsafe.pointer.offset(needle, j))) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return i;
+            }
+            return -1;
+        }
+
+        public static bool contains(string s, string needle) {
+            return StringUtil.indexOf(s, needle) >= 0;
+        }
+
+        public static bool startsWith(string s, string prefix) {
+            int n = s.length;
+            int m = prefix.length;
+            if (m > n) return false;
+            for (int i = 0; i < m; i = i + 1) {
+                if (Unsafe.pointer.read8(Unsafe.pointer.offset(s, i)) !=
+                    Unsafe.pointer.read8(Unsafe.pointer.offset(prefix, i))) return false;
+            }
+            return true;
+        }
+
+        public static bool endsWith(string s, string suffix) {
+            int n = s.length;
+            int m = suffix.length;
+            if (m > n) return false;
+            for (int i = 0; i < m; i = i + 1) {
+                if (Unsafe.pointer.read8(Unsafe.pointer.offset(s, n - m + i)) !=
+                    Unsafe.pointer.read8(Unsafe.pointer.offset(suffix, i))) return false;
+            }
+            return true;
+        }
+
+        public static string toUpper(string s) {
+            int n = s.length;
+            ptr b = Unsafe.memory.alloc(4 + n);
+            Unsafe.pointer.write32(b, n);
+            for (int i = 0; i < n; i = i + 1) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+                if (c >= 97 && c <= 122) c = c - 32;
+                Unsafe.pointer.write8(Unsafe.pointer.offset(b, 4 + i), c);
+            }
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+
+        public static string toLower(string s) {
+            int n = s.length;
+            ptr b = Unsafe.memory.alloc(4 + n);
+            Unsafe.pointer.write32(b, n);
+            for (int i = 0; i < n; i = i + 1) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+                if (c >= 65 && c <= 90) c = c + 32;
+                Unsafe.pointer.write8(Unsafe.pointer.offset(b, 4 + i), c);
+            }
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+
+        public static string trim(string s) {
+            int n = s.length;
+            int start = 0;
+            int end = n;
+            while (start < end) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, start));
+                if (c == 32 || c == 9 || c == 10 || c == 13) start = start + 1;
+                else break;
+            }
+            while (end > start) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, end - 1));
+                if (c == 32 || c == 9 || c == 10 || c == 13) end = end - 1;
+                else break;
+            }
+            return StringUtil.byteSubstring(s, start, end - start);
+        }
+
+        public static string repeat(string s, int n) {
+            if (n <= 0) return "";
+            int m = s.length;
+            int total = m * n;
+            ptr b = Unsafe.memory.alloc(4 + total);
+            Unsafe.pointer.write32(b, total);
+            for (int k = 0; k < n; k = k + 1) {
+                for (int i = 0; i < m; i = i + 1) {
+                    Unsafe.pointer.write8(
+                        Unsafe.pointer.offset(b, 4 + k * m + i),
+                        Unsafe.pointer.read8(Unsafe.pointer.offset(s, i))
+                    );
+                }
+            }
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+
+        public static int parseInt(string s) {
+            int n = s.length;
+            int i = 0;
+            int sign = 1;
+            if (n > 0) {
+                if (Unsafe.pointer.read8(Unsafe.pointer.offset(s, 0)) == 45) {
+                    sign = -1; i = 1;
+                }
+            }
+            int result = 0;
+            while (i < n) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+                if (c < 48 || c > 57) break;
+                result = result * 10 + (c - 48);
+                i = i + 1;
+            }
+            return sign * result;
+        }
+
+        public static double parseDouble(string s) {
+            int n = s.length;
+            int i = 0;
+            int sign = 1;
+            if (n > 0 && Unsafe.pointer.read8(Unsafe.pointer.offset(s, 0)) == 45) {
+                sign = -1; i = 1;
+            }
+            double intPart = 0.0;
+            while (i < n) {
+                int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+                if (c < 48 || c > 57) break;
+                intPart = intPart * 10.0 + ((c - 48) as double);
+                i = i + 1;
+            }
+            double fracPart = 0.0;
+            double scale = 0.1;
+            if (i < n && Unsafe.pointer.read8(Unsafe.pointer.offset(s, i)) == 46) {
+                i = i + 1;
+                while (i < n) {
+                    int c = Unsafe.pointer.read8(Unsafe.pointer.offset(s, i));
+                    if (c < 48 || c > 57) break;
+                    fracPart = fracPart + ((c - 48) as double) * scale;
+                    scale = scale * 0.1;
+                    i = i + 1;
+                }
+            }
+            return sign * (intPart + fracPart);
+        }
+
+        public static string fromInt(int x) {
+            if (x == 0) return "0";
+            bool neg = x < 0;
+            int absx = x;
+            if (neg) absx = -x;
+            int digits = 0;
+            int t = absx;
+            while (t > 0) { digits = digits + 1; t = t / 10; }
+            int total = digits;
+            if (neg) total = total + 1;
+            ptr b = Unsafe.memory.alloc(4 + total);
+            Unsafe.pointer.write32(b, total);
+            int pos = total - 1;
+            t = absx;
+            while (t > 0) {
+                int d = t - (t / 10) * 10;
+                Unsafe.pointer.write8(Unsafe.pointer.offset(b, 4 + pos), 48 + d);
+                t = t / 10;
+                pos = pos - 1;
+            }
+            if (neg) Unsafe.pointer.write8(Unsafe.pointer.offset(b, 4), 45);
+            return Unsafe.pointer.offset(b, 4) as string;
+        }
+    }
+
+    class ArrayInt {
+        public static void sort(int[] arr, fn(int, int) -> bool less) {
+            int n = arr.length;
+            for (int i = 0; i < n - 1; i = i + 1) {
+                for (int j = 0; j < n - 1 - i; j = j + 1) {
+                    if (!less(arr[j], arr[j + 1])) {
+                        int tmp = arr[j];
+                        arr[j] = arr[j + 1];
+                        arr[j + 1] = tmp;
+                    }
+                }
+            }
+        }
+        public static int indexOf(int[] arr, int v) {
+            for (int i = 0; i < arr.length; i = i + 1) {
+                if (arr[i] == v) return i;
+            }
+            return -1;
+        }
+        public static bool contains(int[] arr, int v) {
+            return ArrayInt.indexOf(arr, v) >= 0;
+        }
+        public static void reverse(int[] arr) {
+            int n = arr.length;
+            for (int i = 0; i < n / 2; i = i + 1) {
+                int j = n - 1 - i;
+                int tmp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = tmp;
+            }
+        }
+        public static void fill(int[] arr, int v) {
+            for (int i = 0; i < arr.length; i = i + 1) arr[i] = v;
+        }
+    }
+}
+
+using std;
+
+// byteSubstring
