@@ -7,7 +7,7 @@ import {
     injectHeapStringConv, injectLocalArena,
     injectReadLine, injectParseInt,
     injectFileIO,
-    AllocatorRefs,
+    type AllocatorRefs,
 } from './wasm-runtime';
 
 type RetWasm = 'i32' | 'i64' | 'f32' | 'f64' | 'void';
