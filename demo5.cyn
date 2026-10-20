@@ -1,0 +1,16 @@
+enum Pair {FLAGS = 5, COLOR}
+
+struct Point {
+	int x; int y;
+}
+
+class Program  {
+	static void main() {
+		Point[5] p;
+		for(int i = 0; i < p.length; i++){
+			p[i].x = i;
+			System.println(i, p[i].x);
+		}
+		System.println(Pair.FLAGS, Pair.COLOR);
+	}
+}
