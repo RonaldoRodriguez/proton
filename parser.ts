@@ -66,6 +66,12 @@ export class Parser {
     errors: any[] = [];
     sourceFile: string = '';
 
+    // Seguimiento de tamaños fijos de array en declaraciones tipo `T[N]`.
+    // Cada llamada a parseTypeName() empuja un frame; el resultado del frame
+    // más externo queda en _lastTypeSizes.
+    private _typeNameFrameStack: number[][] = [];
+    private _lastTypeSizes: number[] | null = null;
+
     constructor(tokens: any[], sourceFile: string = '') {
         this.tokens = tokens;
         this.sourceFile = sourceFile;
@@ -196,6 +202,34 @@ export class Parser {
             }
         }
         return null;
+    }
+
+    /**
+     * Avanza sobre cualquier sufijo de array (`[]` o `[N]`) desde `startPos`.
+     * Retorna la posición del primer token que ya no es `[`.
+     */
+    private skipArraySuffix(startPos: number): number {
+        let j = startPos;
+        while (this.tokens[j]?.kind === 'lbrack') {
+            let depth = 1;
+            j++;
+            while (depth > 0 && j < this.tokens.length && this.tokens[j].kind !== 'eof') {
+                if (this.tokens[j].kind === 'lbrack') depth++;
+                else if (this.tokens[j].kind === 'rbrack') depth--;
+                j++;
+            }
+            if (depth !== 0) return startPos; // malformado, no saltar
+        }
+        return j;
+    }
+
+    /**
+     * Convierte los tamaños capturados en `T[N]` a nodos AST válidos.
+     * Semántica y codegen esperan `NewArrayExpr.sizes` como `Expression[]`,
+     * así que sintetizamos `NumberLiteral` en vez de pasar `number`s crudos.
+     */
+    private _sizesToNodes(sizes: number[]): any[] {
+        return sizes.map(n => ({ kind: 'NumberLiteral', value: n }));
     }
 
     // ── using ────────────────────────────────────────────────────
@@ -338,7 +372,7 @@ export class Parser {
     parseStructDecl() {
         const nameTok = this.consume('identifier', undefined, 'Se esperaba el nombre del struct');
 
-        // NUEVO: <T, U: Bound>
+        // <T, U: Bound>
         let typeParams: { name: string; bound: string | null }[] = [];
         if (this.check('operator', '<')) typeParams = this.parseTypeParams();
 
@@ -350,9 +384,15 @@ export class Parser {
                 throw new Error(`[SyntaxError] [${tok.line}:${tok.column}] Se esperaba un tipo de datos para el campo del struct, se encontró '${tok.lexeme}'`);
             }
             const fieldType = this.parseTypeName();
+            const fixedSizes = this._lastTypeSizes;
             const fieldName = this.consume('identifier', undefined, 'Se esperaba el nombre del campo del struct');
             let value = null;
-            if (this.match('operator', '=')) value = this.parseExpression();
+            if (this.match('operator', '=')) {
+                value = this.parseExpression();
+            } else if (fixedSizes && fixedSizes.length > 0) {
+                const baseType = fieldType.replace(/\[\]/g, '');
+                value = { kind: 'NewArrayExpr', elementType: baseType, sizes: this._sizesToNodes(fixedSizes) };
+            }
             this.consume('semicolon', undefined, "Se esperaba ';' al final del campo del struct");
             members.push(this.at({
                 kind: 'FieldDecl',
@@ -373,7 +413,7 @@ export class Parser {
             isInterface: false,
             isAbstract: false,
             isStruct: true,
-            typeParams,                        // NUEVO
+            typeParams,
         }, nameTok);
     }
 
@@ -400,7 +440,6 @@ export class Parser {
         const nameTok = this.consume('identifier', undefined,
             isInterface ? 'Se esperaba el nombre de la interface' : 'Se esperaba el nombre de la clase');
 
-        // NUEVO: <T, U: Bound>
         let typeParams: { name: string; bound: string | null }[] = [];
         if (this.check('operator', '<')) typeParams = this.parseTypeParams();
 
@@ -418,7 +457,6 @@ export class Parser {
             while (this.match('operator', '::')) {
                 baseName += '::' + this.consume('identifier', undefined, 'Se esperaba un nombre tras ::').lexeme;
             }
-            // NUEVO: base genérica Base<T>
             if (this.check('operator', '<')) {
                 const args = this.parseTypeArgs();
                 baseName += '<' + args.join(',') + '>';
@@ -453,7 +491,7 @@ export class Parser {
             isInterface,
             isAbstract: isAbstract || isInterface,
             isFinal,
-            typeParams,                        // NUEVO
+            typeParams,
         }, nameTok);
     }
 
@@ -574,8 +612,14 @@ export class Parser {
     }
 
     parseClassFieldDecl(visibility: string, isStatic: boolean, isConst: boolean, fieldType: string, nameTok: any) {
+        const fixedSizes = this._lastTypeSizes;
         let value = null;
-        if (this.match('operator', '=')) value = this.parseExpression();
+        if (this.match('operator', '=')) {
+            value = this.parseExpression();
+        } else if (fixedSizes && fixedSizes.length > 0) {
+            const baseType = fieldType.replace(/\[\]/g, '');
+            value = { kind: 'NewArrayExpr', elementType: baseType, sizes: this._sizesToNodes(fixedSizes) };
+        }
         this.consume('semicolon', undefined, "Se esperaba ';'");
         return this.at({ kind: 'FieldDecl', visibility, isStatic, isConst, type: fieldType, name: nameTok.lexeme, value }, nameTok);
     }
@@ -605,18 +649,30 @@ export class Parser {
 
         if (this.match('keyword', 'const')) {
             const varType = this.parseTypeName();
+            const fixedSizes = this._lastTypeSizes;
             const ident = this.consume('identifier', undefined, 'Se esperaba un identificador');
             let expr = null;
-            if (this.match('operator', '=')) expr = this.parseExpression();
+            if (this.match('operator', '=')) {
+                expr = this.parseExpression();
+            } else if (fixedSizes && fixedSizes.length > 0) {
+                const baseType = varType.replace(/\[\]/g, '');
+                expr = { kind: 'NewArrayExpr', elementType: baseType, sizes: this._sizesToNodes(fixedSizes) };
+            }
             this.consume('semicolon', undefined, "Se esperaba ';'");
             return this.at({ kind: 'VarDecl', type: varType, name: ident.lexeme, value: expr, isConst: true }, ident);
         }
 
         if (this.isTypeName()) {
             const varType = this.parseTypeName();
+            const fixedSizes = this._lastTypeSizes;
             const ident = this.consume('identifier', undefined, 'Se esperaba un identificador para la variable');
             let expr = null;
-            if (this.match('operator', '=')) expr = this.parseExpression();
+            if (this.match('operator', '=')) {
+                expr = this.parseExpression();
+            } else if (fixedSizes && fixedSizes.length > 0) {
+                const baseType = varType.replace(/\[\]/g, '');
+                expr = { kind: 'NewArrayExpr', elementType: baseType, sizes: this._sizesToNodes(fixedSizes) };
+            }
             this.consume('semicolon', undefined, "Se esperaba ';'");
             return this.at({ kind: 'VarDecl', type: varType, name: ident.lexeme, value: expr }, ident);
         }
@@ -632,29 +688,41 @@ export class Parser {
         if (t0.kind === 'keyword' && t0.lexeme === 'fn') return true;
         const t1 = this.tokens[this.pos + 1];
         const t2 = this.tokens[this.pos + 2];
-        if (t0.kind === 'keyword' && BUILTIN_TYPES.includes(t0.lexeme)) return true;
+        if (t0.kind === 'keyword' && BUILTIN_TYPES.includes(t0.lexeme)) {
+            const after = this.skipArraySuffix(this.pos + 1);
+            if (this.tokens[after]?.kind === 'identifier') return true;
+            return true;   // builtins también son tipo por sí solos (maneja errores después)
+        }
         if (t0.kind === 'identifier' && t1?.kind === 'lbrack' && t2?.kind === 'rbrack') return true;
-        if (t0.kind === 'identifier' && t1?.kind === 'identifier') return true;
+
+        // `Point p`, `Point[5] p`, `Point[5][10] p`, `Point[] p`
+        if (t0.kind === 'identifier') {
+            const after = this.skipArraySuffix(this.pos + 1);
+            if (this.tokens[after]?.kind === 'identifier') return true;
+            if (t1?.kind === 'identifier') return true;
+        }
+
+        // `ns::Point p`, `ns::Point[5] p`
         if (t0.kind === 'identifier' && t1?.kind === 'operator' && t1.lexeme === '::') {
             let i = this.pos + 1;
             while (this.tokens[i]?.kind === 'operator' && this.tokens[i].lexeme === '::' &&
                    this.tokens[i + 1]?.kind === 'identifier') {
                 i += 2;
             }
-            while (this.tokens[i]?.kind === 'lbrack' && this.tokens[i + 1]?.kind === 'rbrack') i += 2;
-            if (this.tokens[i]?.kind === 'identifier') return true;
+            const after = this.skipArraySuffix(i);
+            if (this.tokens[after]?.kind === 'identifier') return true;
         }
 
-        // NUEVO: `Box<int> x` / `Box<int>[] x`
+        // `Box<int> x`, `Box<int>[5] x`
         if (t0.kind === 'identifier' && t1?.kind === 'operator' && t1.lexeme === '<') {
             const after = this.scanGenericClose(this.pos + 1);
             if (after !== null) {
-                let j = after;
-                while (this.tokens[j]?.kind === 'lbrack' && this.tokens[j + 1]?.kind === 'rbrack') j += 2;
-                if (this.tokens[j]?.kind === 'identifier') return true;
+                const afterArr = this.skipArraySuffix(after);
+                if (this.tokens[afterArr]?.kind === 'identifier') return true;
             }
         }
-        // NUEVO: `ns::Box<int> x`
+
+        // `ns::Box<int> x`, `ns::Box<int>[5] x`
         if (t0.kind === 'identifier' && t1?.kind === 'operator' && t1.lexeme === '::') {
             let i = this.pos + 1;
             while (this.tokens[i]?.kind === 'operator' && this.tokens[i].lexeme === '::' &&
@@ -664,9 +732,8 @@ export class Parser {
             if (this.tokens[i]?.kind === 'operator' && this.tokens[i].lexeme === '<') {
                 const after = this.scanGenericClose(i);
                 if (after !== null) {
-                    let j = after;
-                    while (this.tokens[j]?.kind === 'lbrack' && this.tokens[j + 1]?.kind === 'rbrack') j += 2;
-                    if (this.tokens[j]?.kind === 'identifier') return true;
+                    const afterArr = this.skipArraySuffix(after);
+                    if (this.tokens[afterArr]?.kind === 'identifier') return true;
                 }
             }
         }
@@ -674,6 +741,15 @@ export class Parser {
     }
 
     parseTypeName(): string {
+        this._typeNameFrameStack.push([]);
+        try {
+            return this._parseTypeNameInner();
+        } finally {
+            this._lastTypeSizes = this._typeNameFrameStack.pop()!;
+        }
+    }
+
+    private _parseTypeNameInner(): string {
         if (this.check('keyword', 'fn')) {
             this.advance();
             this.consume('lparen', '(', "Se esperaba '(' en tipo fn");
@@ -687,9 +763,18 @@ export class Parser {
             this.consume('operator', '->', "Se esperaba '->' en tipo fn");
             const retType = this.parseTypeName();
             let typeName = `fn(${paramTypes.join(',')})->${retType}`;
-            while (this.check('lbrack') && this.tokens[this.pos + 1]?.kind === 'rbrack') {
-                this.advance(); this.advance();
-                typeName += '[]';
+            while (this.check('lbrack')) {
+                const a1 = this.tokens[this.pos + 1];
+                const a2 = this.tokens[this.pos + 2];
+                if (a1?.kind === 'rbrack') {
+                    this.advance(); this.advance();
+                    typeName += '[]';
+                } else if (a1?.kind === 'number' && a2?.kind === 'rbrack') {
+                    const sizeVal = parseInt(a1.lexeme, 10);
+                    this.advance(); this.advance(); this.advance();
+                    typeName += '[]';
+                    this._typeNameFrameStack[this._typeNameFrameStack.length - 1].push(sizeVal);
+                } else break;
             }
             return typeName;
         }
@@ -700,14 +785,24 @@ export class Parser {
             const n = this.consume('identifier', undefined, 'Se esperaba un nombre tras ::');
             typeName += '::' + n.lexeme;
         }
-        // NUEVO: argumentos genéricos
         if (this.check('operator', '<')) {
             const args = this.parseTypeArgs();
             typeName += '<' + args.join(',') + '>';
         }
-        while (this.check('lbrack') && this.tokens[this.pos + 1]?.kind === 'rbrack') {
-            this.advance(); this.advance();
-            typeName += '[]';
+        // Acepta `[]` (dinámico) y `[N]` (fijo). `[N]` registra el tamaño
+        // en el frame actual y lo reduce a `[]` para el sistema de tipos.
+        while (this.check('lbrack')) {
+            const a1 = this.tokens[this.pos + 1];
+            const a2 = this.tokens[this.pos + 2];
+            if (a1?.kind === 'rbrack') {
+                this.advance(); this.advance();
+                typeName += '[]';
+            } else if (a1?.kind === 'number' && a2?.kind === 'rbrack') {
+                const sizeVal = parseInt(a1.lexeme, 10);
+                this.advance(); this.advance(); this.advance();
+                typeName += '[]';
+                this._typeNameFrameStack[this._typeNameFrameStack.length - 1].push(sizeVal);
+            } else break;
         }
         return typeName;
     }
@@ -773,9 +868,15 @@ export class Parser {
         if (!this.check('semicolon', ';')) {
             if (this.isTypeName()) {
                 const varType = this.parseTypeName();
+                const fixedSizes = this._lastTypeSizes;
                 const ident = this.consume('identifier', undefined, 'Se esperaba un identificador');
                 let expr = null;
-                if (this.match('operator', '=')) expr = this.parseExpression();
+                if (this.match('operator', '=')) {
+                    expr = this.parseExpression();
+                } else if (fixedSizes && fixedSizes.length > 0) {
+                    const baseType = varType.replace(/\[\]/g, '');
+                    expr = { kind: 'NewArrayExpr', elementType: baseType, sizes: this._sizesToNodes(fixedSizes) };
+                }
                 init = this.at({ kind: 'VarDecl', type: varType, name: ident.lexeme, value: expr }, ident);
             } else {
                 init = this.parseExpression();
@@ -1049,6 +1150,21 @@ export class Parser {
     parsePrimary(): any {
         const start = this.peek();
 
+        // struct literal `{ campo: expr, ... }`
+        if (this.match('lbraken', '{')) {
+            const fields: { name: string; value: any }[] = [];
+            if (!this.check('rbraken')) {
+                do {
+                    const nameTok = this.consume('identifier', undefined, 'Se esperaba nombre del campo del struct literal');
+                    this.consume('operator', ':', "Se esperaba ':' después del nombre del campo");
+                    const value = this.parseExpression();
+                    fields.push({ name: nameTok.lexeme, value });
+                } while (this.match('comma'));
+            }
+            this.consume('rbraken', '}', "Se esperaba '}' al cerrar el struct literal");
+            return this.at({ kind: 'StructLiteral', fields }, start);
+        }
+
         if (this.match('keyword', 'this')) return this.at({ kind: 'ThisExpr' }, start);
 
         if (this.match('keyword', 'super')) {
@@ -1064,14 +1180,18 @@ export class Parser {
         if (this.match('keyword', 'new')) {
             const typeTok = this.peek();
             let typeName = null;
-            if (typeTok.kind === 'keyword' && (BUILTIN_TYPES.includes(typeTok.lexeme) || typeTok.lexeme === 'fn')) {
+            if (typeTok.kind === 'keyword' && typeTok.lexeme === 'fn') {
                 typeName = this.parseTypeName();
+            } else if (typeTok.kind === 'keyword' && BUILTIN_TYPES.includes(typeTok.lexeme)) {
+                // Para builtins NO consumimos `[N]` aquí; el bloque
+                // `if (this.check('lbrack'))` de más abajo los procesa.
+                typeName = this.advance().lexeme;
             } else if (typeTok.kind === 'identifier') {
                 typeName = this.advance().lexeme;
                 while (this.match('operator', '::')) {
                     typeName += '::' + this.consume('identifier', undefined, 'Se esperaba un nombre tras ::').lexeme;
                 }
-                // NUEVO: new Box<int>(...)
+                // new Box<int>(...)
                 if (this.check('operator', '<')) {
                     const args = this.parseTypeArgs();
                     typeName += '<' + args.join(',') + '>';

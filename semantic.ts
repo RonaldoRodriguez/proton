@@ -1,5 +1,5 @@
 // semantic.ts
-import { SemanticError } from './error';
+import { SemanticError } from './error.ts';
 
 const NUMERIC_TYPES = new Set(['int', 'int64', 'float', 'double', 'char', 'uint8', 'uint16', 'uint32', 'uint64']);
 const INTEGER_TYPES = new Set(['int', 'int64', 'char', 'uint8', 'uint16', 'uint32', 'uint64']);
@@ -84,7 +84,7 @@ export class SemanticAnalyzer {
         this.usingAliases = new Map();
         this.usingWildcards = [];
 
-        // ── NUEVO: estado de genéricos ────────────────────────
+        // ── Estado de genéricos ────────────────────────
         /** "Box<int>" -> ClassSymbol especializado. */
         this.specializedClasses = new Map();
         /** Cola FIFO de ClassSymbols pendientes de análisis. */
@@ -93,7 +93,6 @@ export class SemanticAnalyzer {
         this.specializedAstNodes = [];
         /** Map<T, type> mientras analizamos el cuerpo de una plantilla. */
         this.currentTypeParams = null;
-        // ─────────────────────────────────────────────────────
     }
 
     pushError(msg, node) {
@@ -105,10 +104,9 @@ export class SemanticAnalyzer {
     }
 
     // ═════════════════════════════════════════════════════════════
-    // ═══ NUEVO ═══: Helpers de genéricos
+    //  Helpers de genéricos
     // ═════════════════════════════════════════════════════════════
 
-    /** Divide "A, B<C,D>" en ["A", "B<C,D>"]. */
     splitTypeArgs(s) {
         const parts = [];
         let depth = 0, cur = '';
@@ -126,7 +124,6 @@ export class SemanticAnalyzer {
         return parts;
     }
 
-    /** Devuelve {base,args} si `typeStr` es `Foo<A,B>`, o null. */
     parseGenericType(typeStr) {
         if (typeof typeStr !== 'string') return null;
         typeStr = typeStr.trim();
@@ -150,7 +147,6 @@ export class SemanticAnalyzer {
         };
     }
 
-    /** Sustituye nombres por sus bindings (T→int, T[]→int[], Box<T>→Box<int>...). */
     substituteType(typeStr, bindings) {
         if (!typeStr) return typeStr;
         typeStr = typeStr.trim();
@@ -171,7 +167,6 @@ export class SemanticAnalyzer {
         return typeStr;
     }
 
-    /** Deep-clone del AST sustituyendo strings de tipo por bindings. */
     substituteAstNode(node, bindings) {
         if (node === null || node === undefined) return node;
         if (typeof node !== 'object') return node;
@@ -186,6 +181,7 @@ export class SemanticAnalyzer {
                 key === 'type' ||
                 key === 'returnType' ||
                 key === 'targetType' ||
+                key === '_targetType' ||      // NUEVO: struct literal en genéricos
                 key === 'elementType' ||
                 key === 'className'
             )) {
@@ -218,7 +214,7 @@ export class SemanticAnalyzer {
     }
 
     // ═════════════════════════════════════════════════════════════
-    //  Overload helpers (idénticos al original)
+    //  Overload helpers
     // ═════════════════════════════════════════════════════════════
     methodSig(name, paramCount, paramTypes) {
         return `${name}#${paramCount}#${paramTypes.join(',')}`;
@@ -306,7 +302,6 @@ export class SemanticAnalyzer {
         if (sourceType === 'null') return true;
         if (targetType === sourceType) return true;
 
-        // NUEVO: si ambos son genéricos, comparar estructura
         if (this.parseGenericType(targetType) || this.parseGenericType(sourceType)) {
             const tg = this.parseGenericType(targetType);
             const sg = this.parseGenericType(sourceType);
@@ -372,15 +367,12 @@ export class SemanticAnalyzer {
         return null;
     }
 
-    // ═══ REEMPLAZADO ═══ lookupClassByFullName
     lookupClassByFullName(fullName) {
         if (typeof fullName !== 'string') return null;
         if (isFnPtrType(fullName)) return null;
 
-        // Cache de especializaciones
         if (this.specializedClasses.has(fullName)) return this.specializedClasses.get(fullName);
 
-        // Intento de instanciación
         const g = this.parseGenericType(fullName);
         if (g) {
             const base = this.resolveTypeName(g.base);
@@ -427,9 +419,7 @@ export class SemanticAnalyzer {
         return sym;
     }
 
-    // ═══ REEMPLAZADO ═══ resolveTypeName
     resolveTypeName(name) {
-        // Sustitución de T mientras analizamos un template
         if (this.currentTypeParams && this.currentTypeParams.size > 0 && typeof name === 'string') {
             let needsSub = false;
             for (const tp of this.currentTypeParams.keys()) {
@@ -442,7 +432,6 @@ export class SemanticAnalyzer {
         if (BUILTIN_TYPES_NO_VOID.has(name) || name === 'void' || name === 'ptr' ||
             name === 'any' || name === 'auto') return name;
 
-        // Normalizar tipo genérico
         const g = this.parseGenericType(name);
         if (g) {
             const resolvedBase = this.usingAliases.get(g.base) ?? g.base;
@@ -460,157 +449,130 @@ export class SemanticAnalyzer {
     }
 
     // ═════════════════════════════════════════════════════════════
-    // ═══ NUEVO ═══: Monomorfización
+    //  Monomorfización
     // ═════════════════════════════════════════════════════════════
-    /**
- * Resuelve la base y registra las firmas de la especialización de forma
- * SÍNCRONA (no en la cola). Necesario para que analyzeNewExpr/analyzeCall/
- * analyzeMemberAccess encuentren constructores, métodos y campos en cuanto
- * el tipo se instancia, sin esperar a que la cola drene.
- *
- * Se cachea el sym en specializedClasses ANTES de llamar aquí, así que
- * la recursión (Box<int> → base genérica → ...) está protegida.
- */
-finalizeSpecializedSignatures(sym) {
-    if (!sym || sym._signaturesDone) return;
-    sym._signaturesDone = true;
+    finalizeSpecializedSignatures(sym) {
+        if (!sym || sym._signaturesDone) return;
+        sym._signaturesDone = true;
 
-    // 1. Resolver baseRef
-    if (sym.baseName) {
-        const parts = sym.baseName.split('::');
-        let baseSym = parts.length === 1
-            ? this.resolveQualified(parts)
-            : this.resolveQualifiedFrom(this.globalScope, parts);
-        if (!baseSym) baseSym = this.lookupClassByFullName(sym.baseName);
+        if (sym.baseName) {
+            const parts = sym.baseName.split('::');
+            let baseSym = parts.length === 1
+                ? this.resolveQualified(parts)
+                : this.resolveQualifiedFrom(this.globalScope, parts);
+            if (!baseSym) baseSym = this.lookupClassByFullName(sym.baseName);
 
-        if (baseSym && baseSym.kind === 'ClassDecl') {
-            if (baseSym.isFinal) {
+            if (baseSym && baseSym.kind === 'ClassDecl') {
+                if (baseSym.isFinal) {
+                    this.pushError(
+                        `La clase '${sym.name}' no puede heredar de '${baseSym.name}' porque es 'final'.`,
+                        sym.node,
+                    );
+                } else {
+                    sym.baseRef = baseSym;
+                }
+            } else if (!baseSym) {
                 this.pushError(
-                    `La clase '${sym.name}' no puede heredar de '${baseSym.name}' porque es 'final'.`,
+                    `La clase base '${sym.baseName}' usada por '${sym.name}' no está declarada.`,
                     sym.node,
                 );
-            } else {
-                sym.baseRef = baseSym;
             }
-        } else if (!baseSym) {
-            this.pushError(
-                `La clase base '${sym.baseName}' usada por '${sym.name}' no está declarada.`,
-                sym.node,
-            );
         }
+
+        this.registerClassSignatures(sym.node, sym);
+        sym.isEffectivelyAbstract = this.computeAbstractness(sym);
     }
-
-    // 2. Registrar firmas de miembros en el scope
-    this.registerClassSignatures(sym.node, sym);
-
-    // 3. Calcular abstractness (ahora sí puede inspeccionar baseRef)
-    sym.isEffectivelyAbstract = this.computeAbstractness(sym);
-}
-
-// completeSpecializationAnalysis(sym) {
 
     ensureSpecializedClass(baseName, args) {
-    const key = `${baseName}<${args.join(',')}>`;
-    if (this.specializedClasses.has(key)) return this.specializedClasses.get(key);
+        const key = `${baseName}<${args.join(',')}>`;
+        if (this.specializedClasses.has(key)) return this.specializedClasses.get(key);
 
-    const template = this.globalScope.lookup(baseName);
-    if (!template || template.kind !== 'ClassDecl' || !template.isGeneric) {
-        this.pushError(`'${baseName}' no es un tipo genérico.`, null);
-        return null;
-    }
-    if ((template.typeParams || []).length !== args.length) {
-        this.pushError(
-            `'${baseName}' espera ${template.typeParams.length} argumento(s) de tipo, se pasaron ${args.length}.`,
-            null,
-        );
-        return null;
-    }
+        const template = this.globalScope.lookup(baseName);
+        if (!template || template.kind !== 'ClassDecl' || !template.isGeneric) {
+            this.pushError(`'${baseName}' no es un tipo genérico.`, null);
+            return null;
+        }
+        if ((template.typeParams || []).length !== args.length) {
+            this.pushError(
+                `'${baseName}' espera ${template.typeParams.length} argumento(s) de tipo, se pasaron ${args.length}.`,
+                null,
+            );
+            return null;
+        }
 
-    const resolvedArgs = args.map(a => this.resolveTypeName(a));
+        const resolvedArgs = args.map(a => this.resolveTypeName(a));
 
-    const bindings = new Map();
-    for (let i = 0; i < template.typeParams.length; i++) {
-        bindings.set(template.typeParams[i].name, resolvedArgs[i]);
-    }
+        const bindings = new Map();
+        for (let i = 0; i < template.typeParams.length; i++) {
+            bindings.set(template.typeParams[i].name, resolvedArgs[i]);
+        }
 
-    // Validar bounds
-    for (let i = 0; i < template.typeParams.length; i++) {
-        const tp = template.typeParams[i];
-        if (tp.bound) {
-            const boundType = this.substituteType(tp.bound, bindings);
-            const argType = resolvedArgs[i];
-            if (argType !== 'any' && boundType !== 'any' && !this.canAssignType(boundType, argType)) {
-                this.pushError(
-                    `'${argType}' no satisface el bound '${tp.bound}' del parámetro '${tp.name}' en '${baseName}'.`,
-                    null,
-                );
+        for (let i = 0; i < template.typeParams.length; i++) {
+            const tp = template.typeParams[i];
+            if (tp.bound) {
+                const boundType = this.substituteType(tp.bound, bindings);
+                const argType = resolvedArgs[i];
+                if (argType !== 'any' && boundType !== 'any' && !this.canAssignType(boundType, argType)) {
+                    this.pushError(
+                        `'${argType}' no satisface el bound '${tp.bound}' del parámetro '${tp.name}' en '${baseName}'.`,
+                        null,
+                    );
+                }
             }
         }
+
+        const parentScope = (template.scope && template.scope.parent) || this.globalScope;
+        const scope = new Scope(parentScope, 'class');
+        scope.fullName = key;
+
+        const sym = {
+            kind: 'ClassDecl',
+            name: key,
+            shortName: key,
+            isInterface: template.isInterface,
+            isAbstract: false,
+            isStruct: template.isStruct,
+            isFinal: false,
+            isEffectivelyAbstract: false,
+            isGeneric: false,
+            isSpecialized: true,
+            templateBase: baseName,
+            templateNode: template.node,
+            typeArgs: resolvedArgs,
+            typeParams: [],
+            scope,
+            baseRef: null,
+            node: null,
+            baseName: template.baseName ? this.substituteType(template.baseName, bindings) : null,
+            baseVisibility: template.baseVisibility || null,
+        };
+
+        const syntheticNode = this.substituteAstNode(template.node, bindings);
+        syntheticNode.name = key;
+        sym.node = syntheticNode;
+        this.specializedAstNodes.push(syntheticNode);
+
+        this.specializedClasses.set(key, sym);
+        this.finalizeSpecializedSignatures(sym);
+        this.pendingSpecializations.push(sym);
+
+        return sym;
     }
-
-    const parentScope = (template.scope && template.scope.parent) || this.globalScope;
-    const scope = new Scope(parentScope, 'class');
-    scope.fullName = key;
-
-    const sym = {
-        kind: 'ClassDecl',
-        name: key,
-        shortName: key,
-        isInterface: template.isInterface,
-        isAbstract: false,
-        isStruct: template.isStruct,
-        isFinal: false,
-        isEffectivelyAbstract: false,
-        isGeneric: false,
-        isSpecialized: true,
-        templateBase: baseName,
-        templateNode: template.node,
-        typeArgs: resolvedArgs,
-        typeParams: [],
-        scope,
-        baseRef: null,
-        node: null,
-        baseName: template.baseName ? this.substituteType(template.baseName, bindings) : null,
-        baseVisibility: template.baseVisibility || null,
-    };
-
-    // Generar AST sintético con tipos sustituidos
-    const syntheticNode = this.substituteAstNode(template.node, bindings);
-    syntheticNode.name = key;
-    sym.node = syntheticNode;
-    this.specializedAstNodes.push(syntheticNode);
-
-    // ═══ FIX: cachear ANTES de cualquier recursión (base puede ser genérica) ═══
-    this.specializedClasses.set(key, sym);
-
-    // ═══ FIX: resolver base + registrar firmas INMEDIATAMENTE ═══
-    // Así, cuando analyzeNewExpr busque constructores en scope.symbols, ya estarán.
-    this.finalizeSpecializedSignatures(sym);
-
-    // Solo el análisis de CUERPOS queda en la cola (puede enriquecer sin bloquear)
-    this.pendingSpecializations.push(sym);
-
-    return sym;
-}
 
     completeSpecializationAnalysis(sym) {
-    if (!sym || sym._analyzed) return;
-    sym._analyzed = true;
-
-    // Las firmas ya fueron registradas en finalizeSpecializedSignatures.
-    // Solo falta analizar los cuerpos (puede enriquecer y encolar más
-    // especializaciones si los métodos construyen otros genéricos).
-    if (sym.node) {
-        this.analyzeClassBodies(sym.node, sym);
+        if (!sym || sym._analyzed) return;
+        sym._analyzed = true;
+        if (sym.node) {
+            this.analyzeClassBodies(sym.node, sym);
+        }
     }
-}
 
     getSpecializedNodes() {
         return this.specializedAstNodes;
     }
 
     // ═════════════════════════════════════════════════════════════
-    //  seedBuiltins (idéntico al original)
+    //  seedBuiltins
     // ═════════════════════════════════════════════════════════════
     seedBuiltins() {
         const method = (returnType, paramTypes) => ({
@@ -704,7 +666,9 @@ finalizeSpecializedSignatures(sym) {
         this.globalScope.define('File', cls('File', fileScope));
     }
 
-    // ═══ REEMPLAZADO ═══ analyze
+    // ═════════════════════════════════════════════════════════════
+    //  analyze
+    // ═════════════════════════════════════════════════════════════
     analyze() {
         this.seedBuiltins();
         this.collectUsings(this.ast.body);
@@ -713,7 +677,6 @@ finalizeSpecializedSignatures(sym) {
         const allClasses = [];
         this.collectClassSymbols(this.globalScope, allClasses);
 
-        // Resolución de herencia SOLO para no-genéricos
         for (const sym of allClasses) {
             if (sym.isGeneric) continue;
             if (!sym.baseName) continue;
@@ -734,7 +697,6 @@ finalizeSpecializedSignatures(sym) {
             sym.baseRef = finalBase;
         }
 
-        // Detección de ciclos (solo no-genéricos)
         for (const sym of allClasses) {
             if (sym.isGeneric) continue;
             const visited = new Set();
@@ -750,7 +712,6 @@ finalizeSpecializedSignatures(sym) {
             }
         }
 
-        // Firmas + abstractness SOLO para no-genéricos
         for (const sym of allClasses) {
             if (sym.isGeneric) continue;
             this.registerClassSignatures(sym.node, sym);
@@ -764,7 +725,6 @@ finalizeSpecializedSignatures(sym) {
             this.analyzeClassBodies(sym.node, sym);
         }
 
-        // Drenar especializaciones (puede añadir más durante el análisis)
         while (this.pendingSpecializations.length > 0) {
             const sym = this.pendingSpecializations.shift();
             this.completeSpecializationAnalysis(sym);
@@ -779,7 +739,9 @@ finalizeSpecializedSignatures(sym) {
         return true;
     }
 
-    // ═══ REEMPLAZADO ═══ registerScopes
+    // ═════════════════════════════════════════════════════════════
+    //  registerScopes
+    // ═════════════════════════════════════════════════════════════
     registerScopes(nodes, scope) {
         for (const node of nodes) {
             if (node.kind === 'NamespaceDecl') {
@@ -821,8 +783,8 @@ finalizeSpecializedSignatures(sym) {
                     isStruct: !!node.isStruct,
                     isFinal: !!node.isFinal,
                     isEffectivelyAbstract: !!node.isAbstract,
-                    isGeneric: typeParams.length > 0,       // NUEVO
-                    typeParams,                              // NUEVO
+                    isGeneric: typeParams.length > 0,
+                    typeParams,
                     baseName: node.base?.name || null,
                     baseVisibility: node.base?.visibility || null,
                     scope: classScope, baseRef: null, node,
@@ -868,7 +830,9 @@ finalizeSpecializedSignatures(sym) {
         }
     }
 
-    // ═══ REEMPLAZADO ═══ verifyEntryPoint
+    // ═════════════════════════════════════════════════════════════
+    //  verifyEntryPoint
+    // ═════════════════════════════════════════════════════════════
     verifyEntryPoint() {
         for (const [, sym] of this.globalScope.symbols) {
             if (sym.kind === 'ClassDecl' && sym.scope && !sym.isBuiltin && !sym.isGeneric) {
@@ -879,7 +843,6 @@ finalizeSpecializedSignatures(sym) {
                 if (this.findMainIn(sym.scope)) return;
             }
         }
-        // Buscar en especializaciones ya instanciadas
         for (const [, sym] of this.specializedClasses) {
             if (sym.scope) {
                 const hasMain = this.lookupMethods(sym, 'main').some(c => c.member.isStatic);
@@ -889,7 +852,6 @@ finalizeSpecializedSignatures(sym) {
         this.pushError("No se encontró un punto de entrada 'static main(...)' en ninguna clase.");
     }
 
-    // ═══ REEMPLAZADO ═══ findMainIn
     findMainIn(scope) {
         for (const [, sym] of scope.symbols) {
             if (sym.kind === 'ClassDecl' && sym.scope && !sym.isGeneric) {
@@ -1012,8 +974,6 @@ finalizeSpecializedSignatures(sym) {
         const previousTypeParams = this.currentTypeParams;
         this.currentScope = classSym.scope;
         this.currentClass = { name: classSym.name, sym: classSym, scope: classSym.scope, node };
-
-        // Para especializaciones, typeParams ya está vacío (tipos sustituidos)
         this.currentTypeParams = null;
 
         for (const member of node.members) {
@@ -1151,6 +1111,9 @@ finalizeSpecializedSignatures(sym) {
         return `el ámbito global`;
     }
 
+    // ═════════════════════════════════════════════════════════════
+    //  visitNode
+    // ═════════════════════════════════════════════════════════════
     visitNode(node) {
         if (!node) return null;
         switch (node.kind) {
@@ -1211,6 +1174,16 @@ finalizeSpecializedSignatures(sym) {
             case 'NullLiteral':  return 'null';
             case 'StringLiteral':return 'string';
             case 'BooleanLiteral': return 'bool';
+            // NUEVO: struct literal — si ya tiene _targetType validado, devolverlo;
+            // si no, es un error: no hay tipo contextual para inferirlo.
+            case 'StructLiteral':
+                if (node._targetType) return node._targetType;
+                this.pushError(
+                    `Struct literal sin tipo objetivo. Solo es válido como inicializador de variable/campo, ` +
+                    `en 'return' de struct, o como argumento a un parámetro de tipo struct.`,
+                    node,
+                );
+                return 'error';
             case 'NumberLiteral':
                 if (typeof node.value === 'bigint') {
                     if (node.isUnsigned) return 'uint64';
@@ -1232,13 +1205,116 @@ finalizeSpecializedSignatures(sym) {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════
+    //  NUEVO: struct literals
+    // ═════════════════════════════════════════════════════════════
+
+    /**
+     * Visita `node` con un tipo objetivo esperado. Si `node` es un struct
+     * literal sin `_targetType`, lo valida contra `targetType` (que debe ser
+     * un `struct`) y devuelve `targetType`. Si no, delega a `visitNode`.
+     */
+    visitExprWithTarget(node, targetType) {
+        if (node && node.kind === 'StructLiteral' && !node._targetType
+            && targetType && targetType !== 'void' && targetType !== 'any') {
+            this.validateStructLiteral(node, targetType);
+            return targetType;
+        }
+        return this.visitNode(node);
+    }
+
+    /**
+     * Valida un struct literal contra su tipo objetivo.
+     * - Exige que `targetType` sea un `struct` (no clase con `new`).
+     * - Verifica que cada campo exista y sea asignable.
+     * - Soporta struct literales anidados recursivamente.
+     * - Persiste `node._targetType` para el codegen.
+     */
+    validateStructLiteral(node, targetType) {
+        if (node._targetType) return true;
+        node._targetType = targetType;
+
+        const ci = this.lookupClassByFullName(this.resolveTypeName(targetType));
+        if (!ci || ci.kind !== 'ClassDecl') {
+            this.pushError(`'${targetType}' no es un tipo válido para un struct literal.`, node);
+            return false;
+        }
+        if (!ci.isStruct) {
+            this.pushError(
+                `Struct literals solo son válidos para 'struct', no para clases. ` +
+                `Usa 'new ${targetType}(...)' para clases.`,
+                node,
+            );
+            return false;
+        }
+
+        const seen = new Set<string>();
+        for (const f of node.fields) {
+            if (seen.has(f.name)) {
+                this.pushError(`Campo '${f.name}' duplicado en struct literal.`, f);
+                continue;
+            }
+            seen.add(f.name);
+
+            const found = this.lookupField(ci, f.name);
+            if (!found) {
+                this.pushError(`El campo '${f.name}' no existe en '${targetType}'.`, f);
+                continue;
+            }
+            if (found.member.kind !== 'FieldDecl') {
+                this.pushError(`'${f.name}' no es un campo en '${targetType}'.`, f);
+                continue;
+            }
+
+            // Nested struct literal
+            if (f.value.kind === 'StructLiteral' && !f.value._targetType) {
+                this.validateStructLiteral(f.value, found.member.type);
+                continue;
+            }
+
+            const vt = this.visitNode(f.value);
+            if (vt !== 'error' && vt !== null && !this.canAssignType(found.member.type, vt)) {
+                this.pushError(
+                    `No se puede asignar '${vt}' al campo '${f.name}' (tipo '${found.member.type}').`,
+                    f.value,
+                );
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Segundo pase para `Call`/`NewExpr`/`SuperCall`: después de resolver
+     * el overload, asigna `_targetType` a los struct literals de args y los
+     * valida. Los índices están marcados en `structLitIndices`.
+     */
+    resolveStructLiteralArgs(args, paramTypes, structLitIndices) {
+        for (const i of structLitIndices) {
+            const pt = paramTypes[i];
+            if (!pt || pt === 'any') {
+                this.pushError(
+                    `Struct literal como argumento ${i + 1} no tiene un tipo de parámetro declarado. ` +
+                    `Usa una variable intermedia o un cast explícito.`,
+                    args[i],
+                );
+                continue;
+            }
+            this.validateStructLiteral(args[i], pt);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    //  Field init
+    // ═════════════════════════════════════════════════════════════
     analyzeFieldDecl(node) { return node.type || 'any'; }
 
     analyzeFieldInit(node) {
         if (!node.value) return;
         const sym = this.currentScope.lookupCurrent(node.name);
         let declaredType = sym ? sym.type : (node.type || 'any');
-        const valueType = this.visitNode(node.value);
+
+        // NUEVO: struct literal
+        const valueType = this.visitExprWithTarget(node.value, declaredType);
 
         if (declaredType === 'auto') {
             declaredType = (valueType === 'error') ? 'any' : valueType;
@@ -1250,6 +1326,9 @@ finalizeSpecializedSignatures(sym) {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════
+    //  Method / Constructor / Destructor bodies
+    // ═════════════════════════════════════════════════════════════
     analyzeMethodBody(node) {
         const methodScope = new Scope(this.currentScope, 'method');
         const previousScope = this.currentScope;
@@ -1349,6 +1428,9 @@ finalizeSpecializedSignatures(sym) {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════
+    //  VarDecl
+    // ═════════════════════════════════════════════════════════════
     analyzeVarDecl(node) {
         const name = node.name;
         if (this.currentScope.lookupCurrent(name)) {
@@ -1363,13 +1445,21 @@ finalizeSpecializedSignatures(sym) {
                 this.currentScope.define(name, { kind: 'VarDecl', type: 'any', isConst: node.isConst || false });
                 return 'any';
             }
+            // NUEVO: struct literal con auto no puede inferir tipo
+            if (node.value.kind === 'StructLiteral' && !node.value._targetType) {
+                this.pushError(
+                    `No se puede inferir el tipo de '${name}' con 'auto' desde un struct literal. Declara el tipo explícitamente.`,
+                    node,
+                );
+                this.currentScope.define(name, { kind: 'VarDecl', type: 'any', isConst: node.isConst || false });
+                return 'any';
+            }
             const valueType = this.visitNode(node.value);
             declaredType = (valueType === 'error') ? 'any' : valueType;
             this.currentScope.define(name, { kind: 'VarDecl', type: declaredType, isConst: node.isConst || false });
             return declaredType;
         }
 
-        // NUEVO: si el tipo es genérico, forzar la instanciación
         if (this.parseGenericType(declaredType)) {
             const inst = this.lookupClassByFullName(this.resolveTypeName(declaredType));
             if (!inst) {
@@ -1407,7 +1497,8 @@ finalizeSpecializedSignatures(sym) {
         }
 
         if (node.value) {
-            const valueType = this.visitNode(node.value);
+            // NUEVO: struct literal con target type
+            const valueType = this.visitExprWithTarget(node.value, declaredType);
             if (valueType && valueType !== 'error' && !this.canAssignType(declaredType, valueType)) {
                 this.pushError(`No se puede inicializar '${name}' de tipo '${declaredType}' con un valor de tipo '${valueType}'.`, node);
             }
@@ -1415,6 +1506,9 @@ finalizeSpecializedSignatures(sym) {
         return declaredType;
     }
 
+    // ═════════════════════════════════════════════════════════════
+    //  Control de flujo
+    // ═════════════════════════════════════════════════════════════
     analyzeIf(node) {
         for (const branch of node.branches) {
             const condType = this.visitNode(branch.condition);
@@ -1529,9 +1623,17 @@ finalizeSpecializedSignatures(sym) {
     }
 
     analyzeReturn(node) {
-        const exprType = node.expr ? this.visitNode(node.expr) : null;
         const method = this.currentMethod;
-        if (!method) return null;
+        if (!method) {
+            if (node.expr) this.visitNode(node.expr);
+            return null;
+        }
+
+        // NUEVO: struct literal en return con target type = returnType
+        let exprType = null;
+        if (node.expr) {
+            exprType = this.visitExprWithTarget(node.expr, method.returnType);
+        }
 
         if (method.isCtor || method.isDtor) {
             if (node.expr && exprType !== 'error') {
@@ -1603,7 +1705,10 @@ finalizeSpecializedSignatures(sym) {
         if (!this.checkConstWrite(node.target, node.target)) return 'error';
         const targetType = this.resolveLValueType(node.target);
         if (targetType === 'error') { this.visitNode(node.expr); return 'error'; }
-        const valueType = this.visitNode(node.expr);
+
+        // NUEVO: struct literal con target type = targetType
+        const valueType = this.visitExprWithTarget(node.expr, targetType);
+
         if (valueType && valueType !== 'error' && !this.canAssignType(targetType, valueType)) {
             this.pushError(`No se puede asignar '${valueType}' a un lvalue de tipo '${targetType}'.`, node.target);
             return 'error';
@@ -1656,27 +1761,38 @@ finalizeSpecializedSignatures(sym) {
     }
 
     analyzeSuperCall(node) {
-        for (const a of node.args) this.visitNode(a);
         if (!this.currentMethod || !this.currentMethod.isCtor) {
+            for (const a of node.args) this.visitNode(a);
             this.pushError(`'super(...)' solo puede usarse dentro de un constructor.`, node);
             return 'void';
         }
         if (!this.currentClass || !this.currentClass.sym.baseRef) {
+            for (const a of node.args) this.visitNode(a);
             this.pushError(`La clase '${this.currentClass?.name ?? '?'}' no tiene clase base, no se puede llamar a 'super(...)'.`, node);
             return 'void';
         }
         const baseSym = this.currentClass.sym.baseRef;
         if (baseSym.isInterface) {
+            for (const a of node.args) this.visitNode(a);
             this.pushError(`'${baseSym.name}' es una interface y no tiene constructores.`, node);
             return 'void';
         }
         if (this.currentMethod.superCallSeen) {
+            for (const a of node.args) this.visitNode(a);
             this.pushError(`Ya se ha llamado a 'super(...)' previamente en este constructor.`, node);
             return 'void';
         }
         this.currentMethod.superCallSeen = true;
 
-        const argTypes = node.args.map(a => this.visitNode(a));
+        // NUEVO: two-pass para struct literals en args
+        const structLitIndices: number[] = [];
+        const argTypes = node.args.map((a, i) => {
+            if (a.kind === 'StructLiteral' && !a._targetType) {
+                structLitIndices.push(i);
+                return 'any';
+            }
+            return this.visitNode(a);
+        });
         if (argTypes.some(t => t === 'error')) return 'void';
 
         const candidates = [];
@@ -1693,6 +1809,10 @@ finalizeSpecializedSignatures(sym) {
         if (!this.isAccessible(resolved.candidate.member, baseSym)) {
             this.pushError(`El constructor de '${baseSym.name}' es '${resolved.candidate.member.visibility}' y no es accesible desde ${this.describeContext()}.`, node);
             return 'void';
+        }
+        // Segundo pase: struct literals
+        if (structLitIndices.length > 0) {
+            this.resolveStructLiteralArgs(node.args, resolved.candidate.member.paramTypes, structLitIndices);
         }
         return 'void';
     }
@@ -1827,7 +1947,15 @@ finalizeSpecializedSignatures(sym) {
             return this.analyzeImportDirective(args, node);
         }
 
-        const argTypes = args.map(a => this.visitNode(a));
+        // NUEVO: struct literals como args → tratar como 'any' en el primer pase
+        const structLitIndices: number[] = [];
+        const argTypes = args.map((a, i) => {
+            if (a.kind === 'StructLiteral' && !a._targetType) {
+                structLitIndices.push(i);
+                return 'any';
+            }
+            return this.visitNode(a);
+        });
         if (argTypes.some(t => t === 'error')) return 'error';
 
         if (callee.kind === 'QualifiedName') {
@@ -1843,6 +1971,9 @@ finalizeSpecializedSignatures(sym) {
             }
             if (!sym.isVariadic && sym.paramCount !== undefined && sym.paramCount !== args.length) {
                 this.pushError(`'${callee.parts.join('::')}' espera ${sym.paramCount} argumento(s), se pasaron ${args.length}.`, node);
+            }
+            if (structLitIndices.length > 0) {
+                this.resolveStructLiteralArgs(args, sym.paramTypes || [], structLitIndices);
             }
             return sym.returnType || 'any';
         }
@@ -1863,6 +1994,9 @@ finalizeSpecializedSignatures(sym) {
                     if (argTypes[i] !== 'error' && !this.canAssignType(fp.params[i], argTypes[i])) {
                         this.pushError(`Argumento ${i + 1} de '${callee.name}': esperaba '${fp.params[i]}', se pasó '${argTypes[i]}'.`, args[i]);
                     }
+                }
+                if (structLitIndices.length > 0) {
+                    this.resolveStructLiteralArgs(args, fp.params, structLitIndices);
                 }
                 return fp.ret;
             }
@@ -1907,6 +2041,9 @@ finalizeSpecializedSignatures(sym) {
                 node._resolvedMethodSig = null;
                 node._resolvedMethodClass = null;
             }
+            if (structLitIndices.length > 0) {
+                this.resolveStructLiteralArgs(args, m.paramTypes, structLitIndices);
+            }
             return m.returnType || 'any';
         }
 
@@ -1941,6 +2078,9 @@ finalizeSpecializedSignatures(sym) {
             }
             node._resolvedMethodSig = this.methodSig(callee.property, m.paramCount, m.paramTypes);
             node._resolvedMethodClass = resolved.candidate.owner.name;
+            if (structLitIndices.length > 0) {
+                this.resolveStructLiteralArgs(args, m.paramTypes, structLitIndices);
+            }
             return m.returnType || 'any';
         }
 
@@ -1993,13 +2133,10 @@ finalizeSpecializedSignatures(sym) {
     }
 
     analyzeNewExpr(node) {
-        for (const a of node.args || []) this.visitNode(a);
-
         const rawName = typeof node.className === 'string'
             ? node.className
             : (node.className.kind === 'QualifiedName' ? node.className.parts.join('::') : String(node.className));
 
-        // NUEVO: forzar instanciación de genéricos
         const resolvedName = this.resolveTypeName(rawName);
         const genericParsed = this.parseGenericType(resolvedName);
         if (genericParsed) {
@@ -2013,25 +2150,37 @@ finalizeSpecializedSignatures(sym) {
         }
 
         if (!classSym || classSym.kind !== 'ClassDecl') {
+            for (const a of node.args || []) this.visitNode(a);
             this.pushError(`'${rawName}' no es una clase declarada.`, node);
             return 'error';
         }
         if (classSym.isBuiltin) {
+            for (const a of node.args || []) this.visitNode(a);
             this.pushError(`'${rawName}' es un tipo interno del compilador y no puede instanciarse con 'new'.`, node);
             return 'error';
         }
         if (classSym.isInterface) {
+            for (const a of node.args || []) this.visitNode(a);
             this.pushError(`No se puede instanciar la interface '${rawName}' con 'new'.`, node);
             return 'error';
         }
         if (classSym.isEffectivelyAbstract) {
+            for (const a of node.args || []) this.visitNode(a);
             this.pushError(`No se puede instanciar '${rawName}': la clase es abstracta.`, node);
             return 'error';
         }
 
         node._resolvedClassName = classSym.name;
 
-        const argTypes = (node.args || []).map(a => this.visitNode(a));
+        // NUEVO: two-pass para struct literals en args
+        const structLitIndices: number[] = [];
+        const argTypes = (node.args || []).map((a, i) => {
+            if (a.kind === 'StructLiteral' && !a._targetType) {
+                structLitIndices.push(i);
+                return 'any';
+            }
+            return this.visitNode(a);
+        });
         if (argTypes.some(t => t === 'error')) return 'error';
 
         if (argTypes.length === 0) {
@@ -2063,6 +2212,9 @@ finalizeSpecializedSignatures(sym) {
             this.pushError(`El constructor de '${rawName}' es '${resolved.candidate.member.visibility}' y no es accesible desde ${this.describeContext()}.`, node);
             return 'error';
         }
+        if (structLitIndices.length > 0) {
+            this.resolveStructLiteralArgs(node.args, resolved.candidate.member.paramTypes, structLitIndices);
+        }
         node._resolvedCtorSig = `__ctor_${argTypes.length}_${resolved.candidate.member.paramTypes.join(',')}`;
         return classSym.name;
     }
@@ -2085,7 +2237,6 @@ finalizeSpecializedSignatures(sym) {
             return rawElem + '[]'.repeat(sizes.length);
         }
 
-        // NUEVO: elemento genérico → instanciación
         const resolvedElem = this.resolveTypeName(rawElem);
         if (this.parseGenericType(resolvedElem)) {
             this.lookupClassByFullName(resolvedElem);
@@ -2481,4 +2632,4 @@ finalizeSpecializedSignatures(sym) {
         this.pushError(`Uso de variable o identificador no declarado '${node.name}'.`, node);
         return 'error';
     }
-}// ensureSpecializedClass(baseName, args) {
+}

@@ -1,5 +1,5 @@
 // wasm-codegen.ts
-import { ModuleBuilder, FunctionIRBuilder, StringPool } from './compiler';
+import { ModuleBuilder, FunctionIRBuilder, StringPool } from './compiler.ts';
 import {
     injectAllocator, injectStringRuntime, injectWasiRuntime,
     injectIntToString, injectFloatToString, injectI64ToString,
@@ -41,8 +41,8 @@ interface ClassInfo {
     tagOffset: number;
     fields: Map<string, { offset: number; type: string; isConst: boolean }>;
     statics: Map<string, { globalName: string; type: string }>;
-    methods: Map<string, MethodInfo>;   // key = sig (name#paramCount#types)
-    ctors: Map<string, CtorInfo>;       // key = __ctor_N_types
+    methods: Map<string, MethodInfo>;
+    ctors: Map<string, CtorInfo>;
     dtor?: string;
     clinit?: string;
     virtualSlots: Map<string, number>;
@@ -227,12 +227,6 @@ export class WasmCodeGen {
         return `${types.length}$${types.map(t => t.replace(/[^a-zA-Z0-9_]/g, '_')).join('$')}`;
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // ═══ NUEVO ═══: sanitiza identificadores para nombres wasm.
-    // Convierte "Box<int>" → "Box_lt_int_gt". Necesario porque los
-    // nombres de función/global wasm no pueden contener '<', '>', ','
-    // ni espacios, y las herramientas estándar lo rechazan.
-    // ═══════════════════════════════════════════════════════════════
     private sanitizeIdent(name: string): string {
         return name.replace(/[<>,\s]/g, (c) => ({
             '<': '_lt_', '>': '_gt_', ',': '_', ' ': '_',
@@ -303,7 +297,6 @@ export class WasmCodeGen {
     private resolveStaticMember(node: any, resolvedSig?: string | null): { ci: ClassInfo; kind: 'field' | 'method'; fieldInfo?: { globalName: string; type: string }; methodInfo?: MethodInfo } | null {
         if (!node || node.kind !== 'MemberAccess') return null;
 
-        // 1) Clase por nombre: `Clase.miembro`
         if (node.object.kind === 'Identifier' && !this.locals.has(node.object.name)) {
             const clsName = this.resolveClassNameForStatic(node.object.name);
             if (clsName) {
@@ -314,7 +307,6 @@ export class WasmCodeGen {
                 let m: MethodInfo | null = null;
                 if (resolvedSig) {
                     const candidate = ci.methods.get(resolvedSig) || null;
-                    // FIX: solo aceptar el candidato si es estático
                     if (candidate && candidate.isStatic) m = candidate;
                 }
                 if (!m) m = this.findStaticMethod(ci, node.property);
@@ -322,7 +314,6 @@ export class WasmCodeGen {
             }
         }
 
-        // 2) this: `this.miembro` (solo estáticos resuelven como "estático")
         if (node.object.kind === 'ThisExpr' && this.curClass) {
             const ci = this.classInfo.get(this.curClass);
             if (ci) {
@@ -330,7 +321,6 @@ export class WasmCodeGen {
                 let m: MethodInfo | null = null;
                 if (resolvedSig) {
                     const candidate = ci.methods.get(resolvedSig) || null;
-                    // FIX
                     if (candidate && candidate.isStatic) m = candidate;
                 }
                 if (!m) m = this.findStaticMethod(ci, node.property);
@@ -338,9 +328,6 @@ export class WasmCodeGen {
             }
         }
 
-        // 3) Objeto tipado: `obj.miembro` — solo resolver aquí si el miembro
-        //    resuelto es realmente estático. En otro caso dejar que la rama
-        //    de instancia (más abajo en emitExpr) haga la llamada correcta.
         const objT = this.getExprType(node.object);
         if (objT && this.classInfo.has(objT)) {
             const ci = this.classInfo.get(objT)!;
@@ -348,7 +335,6 @@ export class WasmCodeGen {
             let m: MethodInfo | null = null;
             if (resolvedSig) {
                 const candidate = ci.methods.get(resolvedSig) || null;
-                // FIX CRÍTICO: si el método es de instancia NO devolverlo aquí
                 if (candidate && candidate.isStatic) m = candidate;
             }
             if (!m) m = this.findStaticMethod(ci, node.property);
@@ -637,12 +623,7 @@ export class WasmCodeGen {
         return helperName;
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // ═══ CAMBIO ═══ compile: acepta `specializations` (AST nodes ya
-    // sustituidos por monomorfización) y los procesa en todas las fases.
-    // ═══════════════════════════════════════════════════════════════
     compile(ast: any, specializations: any[] = []): Uint8Array {
-        // NUEVO: combinar cuerpo normal + especializaciones en una sola lista.
         const allBodies = [...ast.body, ...specializations];
 
         const collectTop = (nodes: any[], currentNs: string = '') => {
@@ -670,7 +651,6 @@ export class WasmCodeGen {
             }
         };
 
-        // CAMBIO: todas las fases usan allBodies (incluye especializaciones).
         this.preScanImports(allBodies);
         collectTop(allBodies);
 
@@ -793,11 +773,6 @@ export class WasmCodeGen {
         });
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // ═══ CAMBIO ═══ computeClassLayout: sanitiza `name` para los wasm
-    // names (campos estáticos, ctors, métodos). Los nombres originales
-    // ("Box<int>") siguen usándose como key en classInfo.
-    // ═══════════════════════════════════════════════════════════════
     private computeClassLayout(name: string, computing: Set<string> = new Set()): void {
         const ci = this.classInfo.get(name);
         if (!ci) return;
@@ -805,7 +780,6 @@ export class WasmCodeGen {
         if (computing.has(name)) throw new Error(`WASM: herencia circular detectada en '${name}'`);
         computing.add(name);
 
-        // NUEVO: nombre saneado para wasm (Box<int> → Box_lt_int_gt)
         const mangled = this.sanitizeIdent(name);
 
         let baseCi: ClassInfo | null = null;
@@ -860,7 +834,6 @@ export class WasmCodeGen {
             if (m.kind !== 'FieldDecl') continue;
             const resolvedType = this.resolveTypeName(m.type);
             if (m.isStatic) {
-                // CAMBIO: `name` → `mangled`
                 const gname = `${mangled}$${m.name}`;
                 const wt = this.wasmType(resolvedType);
                 this.mod.addGlobal(gname, wt, true, wt === 'f64' ? 0.0 : wt === 'f32' ? 0.0 : wt === 'i64' ? 0n : 0);
@@ -880,7 +853,6 @@ export class WasmCodeGen {
             if (m.kind === 'ConstructorDecl') {
                 const pts = m.params.map((p: any) => this.resolveTypeName(p.type));
                 const csig = this.ctorSig(pts);
-                // CAMBIO: `name` → `mangled`
                 const cname = `${mangled}$ctor$${this.sigToWasmSuffix(pts)}`;
                 ci.ctors.set(csig, { wasmName: cname, paramTypes: pts });
             } else if (m.kind === 'MethodDecl') {
@@ -889,7 +861,6 @@ export class WasmCodeGen {
                 const pts = m.params.map((p: any) => this.resolveTypeName(p.type));
                 const hasBody = !!m.body;
                 const sig = this.methodSig(m.name, pts);
-                // CAMBIO: `name` → `mangled`
                 const fname = `${mangled}$${m.name}$${this.sigToWasmSuffix(pts)}${isStatic ? '$static' : ''}`;
 
                 const baseM = ci.methods.get(sig);
@@ -931,7 +902,6 @@ export class WasmCodeGen {
         this.computedLayouts.add(name);
     }
 
-    // ═══ CAMBIO ═══ exportPublicStatics: sanitiza nombre para exports
     private exportPublicStatics(nodes: any[], currentNs: string = '') {
         for (const node of nodes) {
             if (node.kind === 'NamespaceDecl') {
@@ -940,7 +910,6 @@ export class WasmCodeGen {
                 const fullName = currentNs ? `${currentNs}::${node.name}` : node.name;
                 const ci = this.classInfo.get(fullName);
                 if (!ci) continue;
-                // CAMBIO: sanitizar el nombre exportado (Box<int> → Box_lt_int_gt)
                 const safeName = this.sanitizeIdent(fullName.replace(/::/g, '_'));
                 for (const m of node.members) {
                     if (m.kind === 'FieldDecl' && m.isStatic && m.visibility === 'public') {
@@ -1008,18 +977,14 @@ export class WasmCodeGen {
         }
     }
 
-    // ═══ CAMBIO ═══ compileClass: sanitiza className para clinit/dtor
     compileClass(node: any, explicitName?: string) {
         const className = explicitName || node.name;
         const info = this.classInfo.get(className)!;
-
-        // NUEVO: nombre saneado para los wasm names de clinit/dtor.
         const mangled = this.sanitizeIdent(className);
 
         const staticsWithInit = node.members.filter((m: any) =>
             m.kind === 'FieldDecl' && m.isStatic && m.value);
         if (staticsWithInit.length) {
-            // CAMBIO: `${className}$clinit` → `${mangled}$clinit`
             const clinitName = `${mangled}$clinit`;
             info.clinit = clinitName;
             this.mod.addFunction(clinitName, [], null, (b) => {
@@ -1058,13 +1023,12 @@ export class WasmCodeGen {
                         this.locals.set(p.name, { index: slot++, type: p.type });
                     }
                 }
-                if (structParams.length > 0 && this.larenaSavedIndex === null) {
+                // CAMBIO: siempre inicializa larenaSavedIndex
+                if (this.larenaSavedIndex === null) {
                     this.larenaSavedIndex = b.addLocal('__larena_saved', 'i32');
                 }
                 this.collectLocals(m.body, b);
-                if (this.larenaSavedIndex !== null) {
-                    b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
-                }
+                b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
                 for (const sp of structParams) {
                     const spCi = this.classInfo.get(sp.type)!;
                     const dstIdx = this.locals.get(sp.name)!.index;
@@ -1082,16 +1046,16 @@ export class WasmCodeGen {
 
         const dtorNode = node.members.find((m: any) => m.kind === 'DestructorDecl' && m.body);
         if (dtorNode) {
-            // CAMBIO: `${className}$dtor` → `${mangled}$dtor`
             const dname = `${mangled}$dtor`;
             info.dtor = dname;
             this.mod.addFunction(dname, ['i32'], null, (b) => {
                 this.setupFn(b, className, 'void', 'void');
                 this.locals.set('this', { index: 0, type: className });
-                this.collectLocals(dtorNode.body, b);
-                if (this.larenaSavedIndex !== null) {
-                    b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
+                if (this.larenaSavedIndex === null) {
+                    this.larenaSavedIndex = b.addLocal('__larena_saved', 'i32');
                 }
+                this.collectLocals(dtorNode.body, b);
+                b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
                 this.compileStmt(dtorNode.body);
                 if (info.baseName) {
                     const baseName = this.resolveTypeName(info.baseName);
@@ -1145,13 +1109,12 @@ export class WasmCodeGen {
                         this.locals.set(p.name, { index: slot++, type: p.type });
                     }
                 }
-                if (structParams.length > 0 && this.larenaSavedIndex === null) {
+                // CAMBIO: siempre inicializa larenaSavedIndex
+                if (this.larenaSavedIndex === null) {
                     this.larenaSavedIndex = b.addLocal('__larena_saved', 'i32');
                 }
                 this.collectLocals(m.body, b);
-                if (this.larenaSavedIndex !== null) {
-                    b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
-                }
+                b.globalGet(this.localArenaTop); b.setLocal(this.larenaSavedIndex);
                 for (const sp of structParams) {
                     const spCi = this.classInfo.get(sp.type)!;
                     const dstIdx = this.locals.get(sp.name)!.index;
@@ -1258,6 +1221,13 @@ export class WasmCodeGen {
         return t === 'uint8' || t === 'uint16' || t === 'uint32' || t === 'uint64';
     }
 
+    // ─── NUEVO: helper para saber si un tipo es un struct ──────────
+    private isStructType(t: string | null): ClassInfo | null {
+        if (!t) return null;
+        const ci = this.classInfo.get(this.resolveTypeName(t));
+        return ci && ci.isStruct ? ci : null;
+    }
+
     getExprType(node: any): string | null {
         if (!node) return null;
         switch (node.kind) {
@@ -1332,6 +1302,10 @@ export class WasmCodeGen {
                 const rawElem = typeof node.elementType === 'string' ? node.elementType : String(node.elementType);
                 return this.resolveTypeName(rawElem) + '[]'.repeat(dims);
             }
+
+            // NUEVO: StructLiteral devuelve el tipo del contexto
+            case 'StructLiteral':
+                return node._targetType || null;
 
             case 'NumberLiteral':
                 if (typeof node.value === 'bigint') {
@@ -1430,7 +1404,6 @@ export class WasmCodeGen {
     }
 
     resolveCallInfo(node: any): MethodInfo | null {
-        // Prefer semantic-resolved
         if (node._resolvedMethodSig && node._resolvedMethodClass) {
             const ci = this.classInfo.get(node._resolvedMethodClass);
             if (ci) {
@@ -1535,10 +1508,9 @@ export class WasmCodeGen {
                     const idx = b.addLocal(node.name, this.wasmType(resolvedT));
                     this.locals.set(node.name, { index: idx, type: resolvedT });
                 }
+                // Solo trackea stackAllocs (dtor cleanup). larenaSavedIndex ya
+                // está inicializado por el caller (siempre).
                 if (!node.value && this.classInfo.has(this.resolveTypeName(node.type))) {
-                    if (this.larenaSavedIndex === null) {
-                        this.larenaSavedIndex = b.addLocal('__larena_saved', 'i32');
-                    }
                     this.stackAllocs.push({
                         localIndex: this.locals.get(node.name)!.index,
                         type: this.resolveTypeName(node.type),
@@ -1957,6 +1929,7 @@ export class WasmCodeGen {
         b.getLocal(tmpArr); b.getLocal(tmpIdx); b.i32Const(elemSize); b.i32Mul(); b.i32Add();
     }
 
+    // CAMBIO: solo structs son inline. Clases y refs son 4 bytes.
     private elemSizeOf(t: string): number {
         if (this.isFnPtrType(t)) return 4;
         const r = this.resolveTypeName(t);
@@ -1965,7 +1938,7 @@ export class WasmCodeGen {
         if (r === 'int64' || r === 'uint64') return 8;
         if (this.enumInfo.has(r)) return 4;
         const ci = this.classInfo.get(r);
-        if (ci) return ci.sizeof;
+        if (ci && ci.isStruct) return ci.sizeof;
         return 4;
     }
 
@@ -2018,6 +1991,29 @@ export class WasmCodeGen {
                     return;
                 }
                 if (ci && ci.isStruct && node.value) {
+                    // CAMBIO: fast path para StructLiteral (1 alloc, no 2)
+                    if (node.value.kind === 'StructLiteral' && node.value._targetType) {
+                        const tmp = b.addLocal(`__sinit_${this.tmpCounter++}`, 'i32');
+                        b.globalGet(this.localArenaTop); b.setLocal(tmp);
+                        b.getLocal(tmp); b.i32Const(ci.sizeof); b.i32Add(); b.globalSet(this.localArenaTop);
+                        b.getLocal(tmp); b.i32Const(0); b.i32Const(ci.sizeof); b.memoryFill();
+                        if (ci.isPolymorphic) {
+                            b.getLocal(tmp); b.i32Const(ci.typeTag); b.i32Store(ci.tagOffset, 2);
+                        }
+                        for (const f of node.value.fields) {
+                            const fi = ci.fields.get(f.name);
+                            if (!fi) continue;
+                            b.getLocal(tmp);
+                            this.emitExprCoerced(b, f.value, fi.type);
+                            if (fi.type === 'float') b.f32Store(fi.offset, 2);
+                            else if (fi.type === 'double') b.f64Store(fi.offset, 3);
+                            else if (fi.type === 'int64' || fi.type === 'uint64') b.i64Store(fi.offset, 3);
+                            else b.i32Store(fi.offset, 2);
+                        }
+                        b.getLocal(tmp); b.setLocal(local.index);
+                        return;
+                    }
+                    // Fallback: emitir expr + copiar
                     const tmp = b.addLocal(`__sinit_${this.tmpCounter++}`, 'i32');
                     b.globalGet(this.localArenaTop); b.setLocal(tmp);
                     b.getLocal(tmp); b.i32Const(ci.sizeof); b.i32Add(); b.globalSet(this.localArenaTop);
@@ -2200,6 +2196,39 @@ export class WasmCodeGen {
             case 'StringLiteral': {
                 const ref = this.stringPool.add(node.value);
                 b.i32Const(ref.offset); return;
+            }
+
+            // NUEVO: StructLiteral → arena alloc, zero-init, escribe campos,
+            // deja address en pila. Solo válido para structs (semántica
+            // rechaza clases aquí).
+            case 'StructLiteral': {
+                const targetT = node._targetType;
+                if (!targetT) throw new Error('WASM: StructLiteral sin _targetType (bug semántico)');
+                const ci = this.classInfo.get(this.resolveTypeName(targetT));
+                if (!ci) throw new Error(`WASM: struct '${targetT}' no declarada`);
+                if (!ci.isStruct) {
+                    throw new Error(`WASM: StructLiteral solo aplicable a structs, '${targetT}' es clase`);
+                }
+
+                const tmp = b.addLocal(`__sl_${this.tmpCounter++}`, 'i32');
+                b.globalGet(this.localArenaTop); b.setLocal(tmp);
+                b.getLocal(tmp); b.i32Const(ci.sizeof); b.i32Add(); b.globalSet(this.localArenaTop);
+                b.getLocal(tmp); b.i32Const(0); b.i32Const(ci.sizeof); b.memoryFill();
+                if (ci.isPolymorphic) {
+                    b.getLocal(tmp); b.i32Const(ci.typeTag); b.i32Store(ci.tagOffset, 2);
+                }
+                for (const f of node.fields) {
+                    const fi = ci.fields.get(f.name);
+                    if (!fi) continue;
+                    b.getLocal(tmp);
+                    this.emitExprCoerced(b, f.value, fi.type);
+                    if (fi.type === 'float') b.f32Store(fi.offset, 2);
+                    else if (fi.type === 'double') b.f64Store(fi.offset, 3);
+                    else if (fi.type === 'int64' || fi.type === 'uint64') b.i64Store(fi.offset, 3);
+                    else b.i32Store(fi.offset, 2);
+                }
+                b.getLocal(tmp);
+                return;
             }
 
             case 'ThisExpr':
@@ -2577,6 +2606,15 @@ export class WasmCodeGen {
                     if (!ci) throw new Error(`WASM: clase '${objT}' no declarada`);
                     const f = ci.fields.get(t.property);
                     if (!f) throw new Error(`WASM: campo '${t.property}' no existe en '${objT}'`);
+                    // NUEVO: si el campo es struct → memory.copy
+                    const fCi = this.classInfo.get(this.resolveTypeName(f.type));
+                    if (fCi && fCi.isStruct) {
+                        this.emitExpr(b, t.object);
+                        b.i32Const(f.offset); b.i32Add();
+                        this.emitExpr(b, node.expr);
+                        b.i32Const(fCi.sizeof); b.memoryCopy();
+                        return;
+                    }
                     this.emitExpr(b, t.object);
                     this.emitExprCoerced(b, node.expr, f.type);
                     if (f.type === 'float') b.f32Store(f.offset, 2);
@@ -2589,6 +2627,14 @@ export class WasmCodeGen {
                     const elemT = this.arrayElemType(t.array);
                     const es = elemT ? this.elemSizeOf(elemT) : 4;
                     this.emitIndexAddr(b, t.array, t.index, es);
+                    // NUEVO: si el elemento es struct → memory.copy
+                    const resolvedElemT = elemT ? this.resolveTypeName(elemT) : null;
+                    const elemCi = resolvedElemT ? this.classInfo.get(resolvedElemT) : null;
+                    if (elemCi && elemCi.isStruct) {
+                        this.emitExpr(b, node.expr);
+                        b.i32Const(elemCi.sizeof); b.memoryCopy();
+                        return;
+                    }
                     this.emitExprCoerced(b, node.expr, elemT);
                     if (this.isF32Elem(elemT)) b.f32Store(0, 2);
                     else if (this.isF64Elem(elemT)) b.f64Store(0, 3);
@@ -2953,6 +2999,11 @@ export class WasmCodeGen {
                         b.getLocal(nLoc); b.i32Const(elemSize); b.i32Mul(); b.i32Add();
                         b.callByName(this.allocator.malloc); b.setLocal(blkLoc);
                         b.getLocal(blkLoc); b.getLocal(nLoc); b.i32Store(0, 2);
+                        // CAMBIO: zero-init del data section
+                        b.getLocal(blkLoc); b.i32Const(4); b.i32Add();
+                        b.i32Const(0);
+                        b.getLocal(nLoc); b.i32Const(elemSize); b.i32Mul();
+                        b.memoryFill();
                         b.getLocal(blkLoc); b.i32Const(4); b.i32Add(); b.setLocal(resultLocal);
                         return;
                     }
@@ -2998,6 +3049,10 @@ export class WasmCodeGen {
                 const elemT = this.arrayElemType(node.array);
                 const es = elemT ? this.elemSizeOf(elemT) : 4;
                 this.emitIndexAddr(b, node.array, node.index, es);
+                // NUEVO: si el elemento es struct, dejamos el ADDRESS en la pila
+                const resolvedElemT = elemT ? this.resolveTypeName(elemT) : null;
+                const ci = resolvedElemT ? this.classInfo.get(resolvedElemT) : null;
+                if (ci && ci.isStruct) return;
                 if (this.isF32Elem(elemT)) b.f32Load(0, 2);
                 else if (this.isF64Elem(elemT)) b.f64Load(0, 3);
                 else if (this.isI64Elem(elemT)) b.i64Load(0, 3);
@@ -3021,6 +3076,13 @@ export class WasmCodeGen {
                 if (!ci) throw new Error(`WASM: clase '${objT}' no declarada`);
                 const f = ci.fields.get(node.property);
                 if (!f) throw new Error(`WASM: campo '${node.property}' no existe en '${objT}'`);
+                // NUEVO: si el campo es struct, dejamos el ADDRESS
+                const fCi = this.classInfo.get(this.resolveTypeName(f.type));
+                if (fCi && fCi.isStruct) {
+                    this.emitExpr(b, node.object);
+                    b.i32Const(f.offset); b.i32Add();
+                    return;
+                }
                 this.emitExpr(b, node.object);
                 if (f.type === 'float') b.f32Load(f.offset, 2);
                 else if (f.type === 'double') b.f64Load(f.offset, 3);
@@ -3066,6 +3128,3 @@ export class WasmCodeGen {
         }
     }
 }
-
-
-/// resolveStaticMember
